@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Interfaz GNSS QC</title>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+    .main { max-width: 1400px; margin: auto; background: #fff; border-radius: 8px; box-shadow: 0 0 8px rgba(0,0,0,0.1); display: flex; flex-wrap: wrap; gap: 20px; padding: 20px; }
+    .sidebar { flex: 1 1 320px; max-width: 380px; background: #fafafa; border-radius: 8px; padding: 15px 20px; }
+    .station-header h2 { margin: 0 0 5px 0; font-size: 1.8em; color: #2e9ca6; }
+    .info p { margin: 6px 0; font-size: 0.95em; color: #333; }
+    select { width: 100%; padding: 6px 10px; font-size: 1em; margin-top: 15px; border-radius: 4px; border: 1px solid #ccc; }
+    .map-section { flex: 2 1 900px; display: flex; gap: 20px; flex-wrap: nowrap; }
+    .map-image { flex: 1 1 60%; }
+    .map-image img { max-width: 100%; border-radius: 8px; }
+    .table-section { flex: 1 1 40%; max-height: 500px; overflow-y: auto; border-radius: 8px; background: #004a7c; color: white; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.9em; color: white; }
+    th, td { padding: 8px 12px; border-bottom: 1px solid #eee; text-align: left; }
+    tr.green-dot { cursor: pointer; }
+    tr.green-dot .status-dot { background-color: #4CAF50; }
+    tr.active { background: #d9f0f6; color: black; }
+    .status-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+    .graph-container { margin-top: 20px; background: white; padding: 20px 25px; border-radius: 10px; box-shadow: 0 0 5px rgba(0,0,0,0.1); }
+    .graph-container h2 { text-align: center; color: #2e9ca6; margin: 0 0 10px 0; font-weight: 600; }
+    .date-range { text-align: right; font-size: 14px; margin-top: 10px; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="main">
+    <div class="sidebar">
+      <div class="station-header">
+        <h2 class="station-title">Seleccione estación</h2>
+        <input type="date" class="station-calendar" />
+      </div>
+      <div class="info"></div>
+      <select id="metric-select">
+        <option>Multipath (cm)</option>
+        <option>Señal-ruido (dBHZ)</option>
+        <option>Integridad de observaciones (%)</option>
+        <option>Saltos de ciclo</option>
+      </select>
+      <div class="graph-container">
+        <h2 id="chart-title">Gráfico</h2>
+        <div id="chart" style="min-height: 550px;"></div>
+        <div class="date-range" id="date-range"></div>
+      </div>
+    </div>
+
+    <div class="map-section">
+      <div class="map-image">
+        <img src="mapa_estaciones.png" alt="Mapa de estaciones" />
+      </div>
+      <div class="table-section">
+        <table>
+          <thead>
+            <tr><th>Site</th><th>Municipio</th><th>Receptor</th></tr>
+          </thead>
+          <tbody id="station-list"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+<script>
+let qcData = [];          
+let infoBasicaData = [];  
+let currentStation = null;
+let currentMetric = "Multipath (cm)";
+
+// Modificado: si raw=true, devuelve arrays (header:1)
+async function loadExcel(file, sheet, raw=false) {
+  const response = await fetch(file);
+  const arrayBuffer = await response.arrayBuffer();
+  const workbook = XLSX.read(arrayBuffer, { type: "array" });
+  if (raw) {
+    return XLSX.utils.sheet_to_json(workbook.Sheets[sheet], { header: 1 });
+  } else {
+    return XLSX.utils.sheet_to_json(workbook.Sheets[sheet]);
+  }
+}
+
+async function loadData() {
+  qcData = await loadExcel("Base_QC.xlsx", "Sheet1");
+
+  // leer INFORMACIÓN como array
+  const rawInfo = await loadExcel("plantilla_migracion_ccg.xlsx", "INFORMACIÓN", true);
+
+  // primera fila son cabeceras
+  const headers = rawInfo[0];
+  infoBasicaData = rawInfo.slice(1).map(row => {
+    let obj = {};
+    headers.forEach((h, i) => { obj[h] = row[i]; });
+    return obj;
+  });
+
+  console.log("Cabeceras info detectadas:", headers);
+  console.log("Ejemplo fila:", infoBasicaData[0]);
+
+  buildStationTable();
+}
+
+function buildStationTable() {
+  const tbody = document.getElementById("station-list");
+  tbody.innerHTML = "";
+
+  infoBasicaData.forEach(row => {
+    const id = row["NOMENCLATURA"];
+    const muni = row["MUNICIPIO"];
+    const receptor = row["TIPO RECEPTOR"];
+
+    if (!id) return;
+
+    const tr = document.createElement("tr");
+    tr.classList.add("green-dot");
+    tr.dataset.site = id;
+    tr.innerHTML = `
+      <td><span class="status-dot"></span>${id}</td>
+      <td>${muni || ""}</td>
+      <td>${receptor || ""}</td>
+    `;
+    tr.addEventListener("click", () => {
+      document.querySelectorAll("#station-list tr").forEach(r => r.classList.remove("active"));
+      tr.classList.add("active");
+      currentStation = id;
+      updateStationInfo(id);
+      updateChart(id, currentMetric);
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function updateStationInfo(station) {
+  const infoBox = document.querySelector(".info");
+  const row = infoBasicaData.find(r => r["NOMENCLATURA"] === station);
+  const fechas = qcData.filter(d => d.Nombre === station).map(d => new Date(d.Fecha));
+  const ultimaFecha = fechas.length ? new Date(Math.max(...fechas)).toISOString().split("T")[0] : "N/A";
+
+  document.querySelector(".station-title").textContent = station;
+  infoBox.innerHTML = `
+    <p><strong>Receptor:</strong> ${row?.["TIPO RECEPTOR"] || "-"}</p>
+    <p><strong>Antena:</strong> ${row?.["TIPO ANTENA"] || "-"}</p>
+    <p><strong>Municipio:</strong> ${row?.["MUNICIPIO"] || "-"}</p>
+    <p><strong>Última fecha RINEX:</strong> ${ultimaFecha}</p>
+  `;
+}
+
+function updateChart(station, metric) {
+  const data = qcData.filter(d => d.Nombre === station);
+  if (!data.length) return;
+
+  let traces = [];
+  const fechas = data.map(d => d.Fecha);
+
+  switch(metric) {
+    case "Multipath (cm)":
+      traces = [
+        { x: fechas, y: data.map(d => d["Gmp1(cm)"]), mode: 'lines', name: 'GPS MP1' },
+        { x: fechas, y: data.map(d => d["Gmp2(cm)"]), mode: 'lines', name: 'GPS MP2' },
+        { x: fechas, y: data.map(d => d["Glomp1(cm)"]), mode: 'lines', name: 'GLO MP1' },
+        { x: fechas, y: data.map(d => d["Glomp2(cm)"]), mode: 'lines', name: 'GLO MP2' }
+      ];
+      break;
+    case "Señal-ruido (dBHZ)":
+      traces = [
+        { x: fechas, y: data.map(d => d["GS1C (dBHZ)"]), mode: 'lines', name: 'GS1C' },
+        { x: fechas, y: data.map(d => d["GS2S (dBHZ)"]), mode: 'lines', name: 'GS2S' },
+        { x: fechas, y: data.map(d => d["GS2X (dBHZ)"]), mode: 'lines', name: 'GS2X' },
+        { x: fechas, y: data.map(d => d["GS2W (dBHZ)"]), mode: 'lines', name: 'GS2W' },
+        { x: fechas, y: data.map(d => d["GLOS1C (dBHZ)"]), mode: 'lines', name: 'GLOS1C' },
+        { x: fechas, y: data.map(d => d["GLOS1P (dBHZ)"]), mode: 'lines', name: 'GLOS1P' },
+        { x: fechas, y: data.map(d => d["GLOS2C (dBHZ)"]), mode: 'lines', name: 'GLOS2C' }
+      ];
+      break;
+    case "Integridad de observaciones (%)":
+      traces = [
+        { x: fechas, y: data.map(d => d["%Obs"]), mode: 'lines+markers', name: '%Obs' }
+      ];
+      break;
+    case "Saltos de ciclo":
+      traces = [
+        { x: fechas, y: data.map(d => d["Slips"]), mode: 'lines+markers', name: 'Slips', line: { color: 'red' } }
+      ];
+      break;
+  }
+
+  Plotly.newPlot("chart", traces, {
+    margin: { t: 30 },
+    xaxis: { title: "Fecha" },
+    yaxis: { title: metric },
+    legend: { orientation: "h" }
+  });
+
+  document.getElementById("chart-title").textContent = metric;
+  document.getElementById("date-range").textContent = `${fechas[0]} – ${fechas[fechas.length-1]}`;
+}
+
+document.getElementById("metric-select").addEventListener("change", (e) => {
+  currentMetric = e.target.value;
+  if (currentStation) updateChart(currentStation, currentMetric);
+});
+
+loadData();
+</script>
+</body>
+</html>
